@@ -1,8 +1,14 @@
 extends CanvasLayer
 ## In-race display: speed, kick rhythm, race clock, live position, countdown,
-## finish announcements and the results board.
+## finish announcements, the freestyle timer and score, trick callouts, the trick
+## list (Tab) and the results board.
 
 const Race := preload("res://scripts/race.gd")
+const Tricks := preload("res://scripts/tricks.gd")
+const CALLOUT_COLORS := {
+	"trick": Color("7cff6b"), "bail": Color("ff5a36"), "freestyle": Color("d38cff"),
+	"boost": Color("ffd23f"), "info": Color("e8e2d4"),
+}
 
 var main
 var _speed: Label
@@ -14,6 +20,11 @@ var _feed: Label
 var _results: Label
 var _hint: Label
 var _center_hold := 0.0
+var _freestyle: Label
+var _callout: Label
+var _callout_hold := 0.0
+var _trick_list: Label
+var _listening_to: Node
 
 
 func _ready() -> void:
@@ -28,7 +39,18 @@ func _ready() -> void:
 	_results.size = Vector2(500, 400)
 	_hint = _label(Vector2(330, 680), 16, HORIZONTAL_ALIGNMENT_CENTER)
 	_hint.size = Vector2(620, 30)
-	_hint.text = "W kick   A/D steer   S brake   Space ollie   Esc menu"
+	_hint.text = "W kick  A/D steer  S brake  Space ollie  |  In the air: E flip  F grab  R style  Q spin  (+W/A/S/D, Shift)  |  Tab tricks"
+	_hint.position = Vector2(140, 690)
+	_hint.size = Vector2(1000, 24)
+	_freestyle = _label(Vector2(390, 96), 30, HORIZONTAL_ALIGNMENT_CENTER)
+	_freestyle.size = Vector2(500, 40)
+	_freestyle.modulate = Color("d38cff")
+	_callout = _label(Vector2(240, 400), 34, HORIZONTAL_ALIGNMENT_CENTER)
+	_callout.size = Vector2(800, 50)
+	_trick_list = _label(Vector2(24, 110), 16, HORIZONTAL_ALIGNMENT_LEFT)
+	_trick_list.size = Vector2(360, 560)
+	_trick_list.text = "TRICK BOOK (in the air)\n\n" + "\n".join(Tricks.trick_list())
+	_trick_list.visible = false
 	_hint.modulate = Color(1, 1, 1, 0.6)
 	main.race.racer_finished.connect(_on_racer_finished)
 	main.race.results_ready.connect(_on_results)
@@ -41,7 +63,12 @@ func _process(delta: float) -> void:
 		return
 	var race = main.race
 	var me = main.local_skater()
+	_trick_list.visible = Input.is_action_pressed("trick_list")
+	if me and me != _listening_to:
+		me.trick_event.connect(_on_trick_event)
+		_listening_to = me
 	if me:
+		_freestyle.text = "FREESTYLE  %.1fs   %d pts" % [maxf(me.freestyle_left, 0.0), roundi(me.freestyle_score)] if me.freestyle_active else ""
 		_speed.text = "%d km/h" % roundi(me.speed * 3.6)
 		var pips := ""
 		for i in 3:
@@ -49,6 +76,9 @@ func _process(delta: float) -> void:
 		_kicks.text = "KICK  " + pips
 		_place.text = _place_text(me)
 	_clock.text = Race.format_time(race.race_time)
+	if _callout_hold > 0.0:
+		_callout_hold -= delta
+		_callout.modulate.a = clampf(_callout_hold * 2.0, 0.0, 1.0)
 	if race.state == Race.State.COUNTDOWN:
 		_center.text = str(ceili(race.countdown))
 	elif _center_hold > 0.0:
@@ -77,6 +107,12 @@ func _on_state_changed(state: int) -> void:
 	elif state == Race.State.RACING:
 		_center.text = "GO!"
 		_center_hold = 1.0
+
+
+func _on_trick_event(text: String, kind: String) -> void:
+	_callout.text = text
+	_callout.modulate = CALLOUT_COLORS.get(kind, Color.WHITE)
+	_callout_hold = 2.0 if kind == "boost" else 1.4
 
 
 func _on_racer_finished(racer_name: String, place: int, time: float) -> void:

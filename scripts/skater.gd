@@ -1,11 +1,25 @@
 extends CharacterBody3D
-## One racer on a skateboard. The peer that owns it simulates it (bots belong to the
-## host); every other peer sees a synced copy.
+## One racer: a Big Head Panda on a skateboard. The peer that owns it simulates it
+## (bots belong to the host); every other peer sees a synced copy and animates it.
 ##
 ## Kick rhythm: holding kick makes the 1st kick-off start you, the 2nd follow, and the
 ## 3rd and every kick after hold top speed. Wet floors keep your speed, dry floors drag,
 ## downhills speed you up without kicking. Hit a wall head-on and you lose most of your
 ## speed; hit a crate hard enough and it smashes.
+##
+## Freestyle: entering The Drop opens an 8-second window. Hit the kickers and pull
+## tricks from the trick book (tricks.gd): 25 air tricks plus spins from 180 to 1080.
+## Land clean to bank points; land mid-trick and you bail. When the window closes your
+## points turn into a speed boost. Land an odd number of half spins and you ride fakie.
+##
+## Hazards: zombies climb out of the ground (they block you like a wall), and bats
+## swoop low enough to spook you.
+
+signal trick_event(text: String, kind: String)   # local feedback for the HUD
+
+const Level := preload("res://scripts/level.gd")
+const Panda := preload("res://scripts/panda.gd")
+const Tricks := preload("res://scripts/tricks.gd")
 
 const TOP_SPEED := 8.0
 const KICK_TIERS: Array[float] = [0.38, 0.72, 1.0]     # share of top speed each kick reaches
@@ -13,15 +27,19 @@ const KICK_TIMES: Array[float] = [1.1, 0.63, 0.63]     # seconds per kick
 const PUSH_SHARE := 0.6                                # the push is done by 60% of the kick
 const SLOPE_GAIN := 0.5
 const OVERSPEED := 1.35
+const MAX_BOOST := 3.0
 const BRAKE := 8.0
 const TURN_RATE := 2.4
 const OLLIE_VELOCITY := 5.2
 const GRAVITY := 14.0
 const CRASH_KEEP := 0.35          # share of speed kept after a head-on crash
 const CRATE_SMASH_SPEED := 6.0
-const FALL_LIMIT := -14.0
 const GRID_X: Array[float] = [-2.4, -0.8, 0.8, 2.4]
-const Level := preload("res://scripts/level.gd")
+
+const SPIN_RATE := TAU * 2.6       # radians per second while spinning (a 1080 needs big air)
+const LAND_TOLERANCE := 0.5       # radians short of a half turn still counted as clean
+const AIR_POINTS_PER_SECOND := 60.0
+const POINTS_PER_BOOST := 150.0   # freestyle points per m/s of boost
 
 var peer_id := 1
 var is_bot := false
@@ -30,22 +48,54 @@ var slot := 0
 var racer_name := "Skater"
 var color := Color.WHITE
 
+# Synced to every peer (drives the animation).
 var speed := 0.0
+var kick_phase := 0.0
+var lean := 0.0
+var spin := 0.0                   # body + board yaw (a multiple of PI on the ground)
+var board_roll := 0.0
+var board_yaw := 0.0
+var board_pitch := 0.0
+var pose := 0                     # grab / style pose id (see panda.gd)
+var pose_t := 0.0                 # 0..1 progress of a style trick
+var airborne := false
+var bail_t := 0.0
+
 var heading := 0.0
 var kicks := 0
 var finished := false
 var finish_time := 0.0
 var respawns := 0
 
+# Freestyle (owner only).
+var freestyle_active := false
+var freestyle_left := 0.0
+var freestyle_score := 0.0
+var _freestyle_done := false
+
+var _panda: Node3D
 var _kicking := false
 var _kick_t := 0.0
 var _kick_len := 0.0
 var _kick_from := 0.0
 var _kick_to := 0.0
 var _kick_idle := 0.0
-var _floor_drag := 1.2
+var _floor_drag := Level.DRAG_DRY
 var _bot_lane := 0.0
 var _crash_cooldown := 0.0
+var _air_time := 0.0
+var _spinning := false
+var _spin_this_jump := 0.0        # radians spun since take-off
+var _spin_target := 0.0           # where the spin stops (next half turn after Q is let go)
+var _flip: Array = []             # the flip trick in progress (a trick book entry)
+var _flip_t := 0.0
+var _style: Array = []
+var _style_t := 0.0
+var _grab: Array = []
+var _grab_time := 0.0
+var _jump_tricks: Array[String] = []
+var _jump_points := 0.0
+var _hazard_cooldown := 0.0
 
 
 ## Called by the spawner on every peer with the same data.
@@ -58,7 +108,7 @@ func setup(data: Dictionary) -> void:
 	name = "P%d" % peer_id
 	_bot_lane = GRID_X[slot % GRID_X.size()]
 	floor_snap_length = 0.5
-	floor_max_angle = deg_to_rad(35.0)
+	floor_max_angle = deg_to_rad(40.0)
 	_build()
 	set_multiplayer_authority(1 if is_bot else peer_id)
 	autopilot = is_bot
@@ -76,6 +126,11 @@ func reset_to_grid() -> void:
 	finished = false
 	finish_time = 0.0
 	respawns = 0
+	freestyle_active = false
+	freestyle_score = 0.0
+	_freestyle_done = false
+	_clear_tricks()
+	spin = 0.0
 
 
 static func grid_position(grid_slot: int) -> Vector3:
@@ -86,6 +141,15 @@ func forward() -> Vector3:
 	return Vector3(-sin(heading), 0.0, -cos(heading))
 
 
+func _process(delta: float) -> void:
+	if _panda:
+		_panda.animate(delta, {
+			"kick_phase": kick_phase, "lean": lean, "spin": spin, "roll": board_roll,
+			"yaw": board_yaw, "pitch": board_pitch, "pose": pose, "pose_t": pose_t,
+			"air": airborne, "bail": bail_t,
+		})
+
+
 func _physics_process(delta: float) -> void:
 	if not is_multiplayer_authority():
 		return
@@ -93,16 +157,20 @@ func _physics_process(delta: float) -> void:
 	if race == null or not (race.is_racing() or finished):
 		return                                              # frozen on the grid
 	var cmd := _bot_input() if autopilot else _player_input()
-	if finished:
-		cmd = {"kick": false, "brake": speed > 3.0, "steer": 0.0, "ollie": false}
+	if finished or bail_t > 0.0:
+		cmd = _idle_cmd()
+		cmd.brake = finished and speed > 3.0
 
 	heading -= cmd.steer * TURN_RATE * delta
 	rotation = Vector3(0.0, heading, 0.0)
 	var fwd := forward()
+	lean = lerpf(lean, -cmd.steer * 0.32 * clampf(speed / TOP_SPEED, 0.0, 1.0), clampf(delta * 6.0, 0.0, 1.0))
+	bail_t = maxf(bail_t - delta, 0.0)
 
 	if is_on_floor():
 		_update_kick(cmd.kick, delta)
-		var downhill := Vector3.DOWN.slide(get_floor_normal()).dot(fwd) * GRAVITY
+		var n := get_floor_normal()
+		var downhill := Vector3.DOWN.slide(n).dot(fwd) * GRAVITY
 		if absf(downhill) > 0.05:
 			speed += downhill * SLOPE_GAIN * delta
 		if not _kicking:
@@ -111,23 +179,35 @@ func _physics_process(delta: float) -> void:
 			speed -= BRAKE * delta
 			_kicking = false
 		if speed > TOP_SPEED and downhill <= 0.05:
-			speed = move_toward(speed, TOP_SPEED, 2.0 * delta)
-		speed = clampf(speed, 0.0, TOP_SPEED * OVERSPEED)
-		velocity.y = OLLIE_VELOCITY if cmd.ollie else 0.0
+			speed = move_toward(speed, TOP_SPEED, 1.0 * delta)          # extra speed bleeds off
+		speed = clampf(speed, 0.0, TOP_SPEED * OVERSPEED + MAX_BOOST)
+		# Ride along the surface, so a kicker throws you up and a slope carries you down.
+		var along := (fwd * speed).slide(n)
+		velocity = along.normalized() * speed if along.length() > 0.001 else Vector3.ZERO
+		if cmd.ollie:
+			velocity.y += OLLIE_VELOCITY
 	else:
+		velocity.x = fwd.x * speed
+		velocity.z = fwd.z * speed
 		velocity.y -= GRAVITY * delta
+		_update_tricks(cmd, delta)
 
-	velocity.x = fwd.x * speed
-	velocity.z = fwd.z * speed
 	move_and_slide()
 	_after_move(fwd, delta)
+	kick_phase = clampf(_kick_t / _kick_len, 0.0, 1.0) if _kicking else 0.0
+	_update_freestyle(delta)
 
-	if global_position.y < FALL_LIMIT:
+	if global_position.y < Level.FALL_LIMIT:
 		_respawn()
 
 
 func _after_move(fwd: Vector3, delta: float) -> void:
 	_crash_cooldown = maxf(_crash_cooldown - delta, 0.0)
+	_hazard_cooldown = maxf(_hazard_cooldown - delta, 0.0)
+	if _hazard_cooldown == 0.0 and _level().bat_hits(global_position + Vector3.UP * 1.6):
+		_hazard_cooldown = 1.5
+		speed *= 0.85
+		trick_event.emit("BATS!", "bail")
 	for i in get_slide_collision_count():
 		var hit := get_slide_collision(i)
 		var n := hit.get_normal()
@@ -135,15 +215,32 @@ func _after_move(fwd: Vector3, delta: float) -> void:
 		if n.y > 0.7:
 			_floor_drag = Level.drag_of(collider)
 			continue
+		if collider and collider.has_meta("zombie"):
+			if _hazard_cooldown == 0.0:
+				_hazard_cooldown = 1.0
+				speed *= 0.6
+				kicks = 0
+				_kicking = false
+				bail_t = 0.5
+				trick_event.emit("ZOMBIE!", "bail")
+			continue
 		if absf(n.y) < 0.5 and n.dot(fwd) < -0.6 and speed > 2.0 and _crash_cooldown == 0.0:
 			_crash_cooldown = 0.4
 			if collider and collider.has_meta("crate") and speed >= CRATE_SMASH_SPEED:
 				_level().rpc("break_crate", collider.get_meta("crate"))
 				speed *= 0.75
+				trick_event.emit("SMASH!", "info")
 			else:
 				speed *= CRASH_KEEP
 				kicks = 0
 				_kicking = false
+
+	var on_floor := is_on_floor()
+	if on_floor and airborne:
+		_land()
+	airborne = not on_floor
+	if airborne:
+		_air_time += delta
 
 
 func _respawn() -> void:
@@ -156,6 +253,160 @@ func _respawn() -> void:
 	kicks = 0
 	_kicking = false
 	respawns += 1
+	_clear_tricks()
+	spin = 0.0
+	airborne = false
+	trick_event.emit("SPLASH! Back to the checkpoint", "bail")
+
+
+# ------------------------------------------------------------------- tricks
+
+func _update_tricks(cmd: Dictionary, delta: float) -> void:
+	# Start tricks (one flip, and either a grab or a style trick, at a time).
+	if cmd.flip and _flip.is_empty():
+		_flip = Tricks.lookup("flip", cmd.shift, cmd.dir)
+		_flip_t = 0.0
+	if cmd.style and _style.is_empty() and _grab.is_empty():
+		_style = Tricks.lookup("style", cmd.shift, cmd.dir)
+		_style_t = 0.0
+	if cmd.grab_pressed and _grab.is_empty() and _style.is_empty():
+		_grab = Tricks.lookup("grab", cmd.shift, cmd.dir)
+		_grab_time = 0.0
+
+	# Flip: the board turns its whole turns over the trick's time.
+	if not _flip.is_empty():
+		_flip_t += delta
+		var k := clampf(_flip_t / _flip[2], 0.0, 1.0)
+		board_roll = TAU * _flip[3] * k
+		board_yaw = TAU * _flip[4] * k
+		board_pitch = TAU * _flip[5] * k
+		if k >= 1.0:
+			_bank_trick(_flip[0], _flip[1])
+			_flip = []
+			board_roll = 0.0
+			board_pitch = 0.0
+			board_yaw = 0.0
+
+	# Style trick: a timed pose.
+	if not _style.is_empty():
+		_style_t += delta
+		pose = _style[6]
+		pose_t = clampf(_style_t / _style[2], 0.0, 1.0)
+		if pose_t >= 1.0:
+			_bank_trick(_style[0], _style[1])
+			_style = []
+			pose = 0
+			pose_t = 0.0
+
+	# Grab: held for points per second.
+	if not _grab.is_empty():
+		if cmd.grab_held:
+			_grab_time += delta
+			pose = _grab[6]
+		else:
+			_end_grab()
+
+	# Spin: keeps going while held, then finishes to the next half turn.
+	if cmd.spin_held:
+		_spinning = true
+		_spin_target = INF
+	elif _spinning and _spin_target == INF:
+		_spin_target = ceilf((_spin_this_jump + 0.01) / PI) * PI
+	if _spinning:
+		var limit := float(Tricks.MAX_HALF_TURNS) * PI
+		var target := minf(_spin_target, limit)
+		var step := minf(SPIN_RATE * delta, target - _spin_this_jump)
+		_spin_this_jump += step
+		spin -= step
+		if _spin_this_jump >= target - 0.001:
+			_spinning = false
+
+
+func _end_grab() -> void:
+	if _grab.is_empty():
+		return
+	if _grab_time >= _grab[2]:
+		_bank_trick(_grab[0], _grab[1] * _grab_time)
+	_grab = []
+	pose = 0
+
+
+func _bank_trick(trick_name: String, points: float) -> void:
+	_jump_tricks.append(trick_name)
+	_jump_points += points
+
+
+func _land() -> void:
+	_end_grab()
+	var spin_short := 0.0
+	if _spin_this_jump > 0.3:
+		var nearest := roundf(_spin_this_jump / PI) * PI
+		spin_short = absf(_spin_this_jump - nearest)
+	var unfinished: bool = (not _flip.is_empty() and _flip_t < _flip[2] * 0.85) \
+		or (not _style.is_empty() and _style_t < _style[2] * 0.8) or spin_short > LAND_TOLERANCE
+	if unfinished:
+		speed *= 0.4
+		bail_t = 0.9
+		kicks = 0
+		trick_event.emit("BAIL!", "bail")
+		spin = roundf(spin / PI) * PI
+		_clear_tricks()
+		return
+
+	if not _flip.is_empty():
+		_bank_trick(_flip[0], _flip[1])
+	if not _style.is_empty():
+		_bank_trick(_style[0], _style[1])
+	var half_turns := mini(roundi(_spin_this_jump / PI), Tricks.MAX_HALF_TURNS)
+	if half_turns > 0:
+		_bank_trick(Tricks.spin_name(half_turns), Tricks.SPIN_POINTS[half_turns])
+	spin = roundf(spin / PI) * PI                                     # fakie if odd half turns
+	if not _jump_tricks.is_empty():
+		var points := (_jump_points + _air_time * AIR_POINTS_PER_SECOND) * (1.0 + 0.5 * (_jump_tricks.size() - 1))
+		var label := " + ".join(_jump_tricks)
+		if freestyle_active:
+			freestyle_score += points
+			trick_event.emit("%s  +%d" % [label, roundi(points)], "trick")
+		else:
+			trick_event.emit(label, "trick")
+	_clear_tricks()
+
+
+func _clear_tricks() -> void:
+	_spinning = false
+	_spin_this_jump = 0.0
+	_spin_target = 0.0
+	_flip = []
+	_style = []
+	_grab = []
+	_flip_t = 0.0
+	_style_t = 0.0
+	_grab_time = 0.0
+	board_roll = 0.0
+	board_yaw = 0.0
+	board_pitch = 0.0
+	pose = 0
+	pose_t = 0.0
+	_air_time = 0.0
+	_jump_points = 0.0
+	_jump_tricks.clear()
+
+
+func _update_freestyle(delta: float) -> void:
+	var z := global_position.z
+	if not freestyle_active and not _freestyle_done and Level.in_freestyle_zone(z):
+		freestyle_active = true
+		freestyle_left = Level.FREESTYLE_SECONDS
+		freestyle_score = 0.0
+		trick_event.emit("FREESTYLE!", "freestyle")
+	if freestyle_active:
+		freestyle_left -= delta
+		if freestyle_left <= 0.0 or z <= Level.SLOPE_END:
+			freestyle_active = false
+			_freestyle_done = true
+			var boost := minf(freestyle_score / POINTS_PER_BOOST, MAX_BOOST)
+			speed += boost
+			trick_event.emit("FREESTYLE %d   BOOST +%d km/h" % [roundi(freestyle_score), roundi(boost * 3.6)], "boost")
 
 
 # --------------------------------------------------------------- kick rhythm
@@ -204,14 +455,63 @@ func _player_input() -> Dictionary:
 		"brake": Input.is_action_pressed("brake"),
 		"steer": Input.get_axis("steer_left", "steer_right"),
 		"ollie": Input.is_action_just_pressed("ollie"),
+		"flip": Input.is_action_just_pressed("trick_flip"),
+		"style": Input.is_action_just_pressed("trick_style"),
+		"grab_pressed": Input.is_action_just_pressed("trick_grab"),
+		"grab_held": Input.is_action_pressed("trick_grab"),
+		"spin_held": Input.is_action_pressed("trick_spin"),
+		"shift": Input.is_action_pressed("trick_mod"),
+		"dir": _held_direction(),
 	}
 
 
-## Simple racing line: hold a lane, swerve around crates, line up for the plank.
+## The direction held when a trick button is pressed picks the variation.
+static func _held_direction() -> String:
+	if Input.is_action_pressed("kick"):
+		return "W"
+	if Input.is_action_pressed("brake"):
+		return "S"
+	if Input.is_action_pressed("steer_left"):
+		return "A"
+	if Input.is_action_pressed("steer_right"):
+		return "D"
+	return ""
+
+
+static func _idle_cmd() -> Dictionary:
+	return {"kick": false, "brake": false, "steer": 0.0, "ollie": false, "flip": false,
+		"style": false, "grab_pressed": false, "grab_held": false, "spin_held": false,
+		"shift": false, "dir": ""}
+
+
+## Racing line: hold a lane, swerve around crates, hit the kickers with a trick,
+## and line up for the plank.
 func _bot_input() -> Dictionary:
 	var pos := global_position
 	var target_x := _bot_lane
-	if pos.z < -126.0 and pos.z > -148.0:
+	var cmd := _idle_cmd()
+	cmd.kick = true
+
+	if Level.in_freestyle_zone(pos.z + 3.0):
+		target_x = clampf(_bot_lane, -1.2, 1.2)                     # stay on the kickers
+		for kz in Level.KICKER_Z:
+			var lip := kz - Level.KICKER_LENGTH
+			if is_on_floor() and pos.z < lip + 0.7 and pos.z > lip - 0.2:
+				cmd.ollie = true
+		# Each bot has a signature move, with a different variation on each kicker.
+		if airborne and velocity.y > 1.5:
+			var variation: String = ["", "W", "A", "S", "D"][(int(-pos.z) / 24 + slot) % 5]
+			cmd.dir = variation
+			cmd.shift = slot == 3
+			match slot % 4:
+				0, 3:
+					cmd.flip = _air_time < 0.1
+				1:
+					cmd.spin_held = _air_time < 0.25
+				2:
+					cmd.grab_pressed = _air_time < 0.1
+					cmd.grab_held = _air_time < 0.7
+	elif pos.z < Level.GAP_START + 14.0 and pos.z > Level.GAP_END - 2.0:
 		target_x = 0.0
 	else:
 		var space := get_world_3d().direct_space_state
@@ -219,17 +519,13 @@ func _bot_input() -> Dictionary:
 		var query := PhysicsRayQueryParameters3D.create(from, from + forward() * 7.0)
 		query.exclude = [get_rid()]
 		var hit := space.intersect_ray(query)
-		if hit and hit.collider.has_meta("crate"):
+		if hit and (hit.collider.has_meta("crate") or hit.collider.has_meta("zombie")):
 			var crate_x: float = hit.collider.global_position.x
 			_bot_lane = clampf(crate_x + (1.9 if pos.x >= crate_x else -1.9), -3.3, 3.3)
 			target_x = _bot_lane
 	var desired := atan2(-(target_x - pos.x), 6.0)
-	return {
-		"kick": true,
-		"brake": false,
-		"steer": clampf((heading - desired) * 3.0, -1.0, 1.0),
-		"ollie": false,
-	}
+	cmd.steer = clampf((heading - desired) * 3.0, -1.0, 1.0)
+	return cmd
 
 
 # --------------------------------------------------------------------- build
@@ -243,55 +539,31 @@ func _build() -> void:
 	shape.position.y = 0.95
 	add_child(shape)
 
-	var body := CapsuleMesh.new()
-	body.radius = 0.32
-	body.height = 1.5
-	_mesh(body, Vector3(0, 1.0, 0), _flat(color, 0.5))
-	_mesh(_cube(Vector3(0.4, 0.14, 0.1)), Vector3(0, 1.45, -0.28), _flat(Color("101418"), 0.3))
-	_mesh(_cube(Vector3(0.26, 0.05, 0.85)), Vector3(0, 0.12, 0), _flat(Color("2b2b2b"), 0.7))
-	for z in [-0.3, 0.3]:
-		_mesh(_cube(Vector3(0.3, 0.08, 0.08)), Vector3(0, 0.05, z), _flat(color.lightened(0.4), 0.6))
+	_panda = Panda.new()
+	_panda.name = "Panda"
+	add_child(_panda)
+	_panda.build(color)
 
 	var label := Label3D.new()
 	label.text = racer_name
-	label.position.y = 2.15
+	label.position.y = 2.75
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	label.font_size = 48
 	label.outline_size = 10
 	label.modulate = color.lightened(0.3)
 	add_child(label)
 
-	# Position and facing are sent from the owner to everyone else.
+	# The owner sends position, facing and animation state to everyone else.
 	var sync := MultiplayerSynchronizer.new()
 	sync.name = "Sync"
 	var config := SceneReplicationConfig.new()
-	for prop in [":position", ":rotation", ":speed"]:
+	for prop in [":position", ":rotation", ":speed", ":kick_phase", ":lean", ":spin",
+			":board_roll", ":board_yaw", ":board_pitch", ":pose", ":pose_t", ":airborne", ":bail_t"]:
 		var path := NodePath("." + prop)
 		config.add_property(path)
 		config.property_set_replication_mode(path, SceneReplicationConfig.REPLICATION_MODE_ALWAYS)
 	sync.replication_config = config
 	add_child(sync)
-
-
-func _mesh(mesh: Mesh, pos: Vector3, mat: Material) -> void:
-	var instance := MeshInstance3D.new()
-	instance.mesh = mesh
-	instance.material_override = mat
-	instance.position = pos
-	add_child(instance)
-
-
-static func _cube(size: Vector3) -> BoxMesh:
-	var mesh := BoxMesh.new()
-	mesh.size = size
-	return mesh
-
-
-static func _flat(c: Color, roughness: float) -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = c
-	mat.roughness = roughness
-	return mat
 
 
 func _race():

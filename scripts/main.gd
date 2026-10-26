@@ -8,6 +8,7 @@ extends Node
 ##   --expect=N                      host starts the race once N racers are in
 ##   --autopilot                     your skater drives itself
 ##   --quit-after-race               print the results and quit
+##   --log-tricks                    print every trick, bail and hazard hit
 ##   --shots=4,10,16                 save screenshots (shot_<seconds>.png) at those times
 
 const PORT := 7777
@@ -28,6 +29,7 @@ var camera: Camera3D
 
 var _opts := {}
 var _in_session := false
+var _orbit := 0.0
 var _next_bot := 0
 var _menu: CanvasLayer
 var _main_panel: PanelContainer
@@ -99,15 +101,51 @@ func _process(delta: float) -> void:
 	if me:
 		if _opts.has("autopilot"):
 			me.autopilot = true
-		var back: Vector3 = me.global_basis.z
-		var target: Vector3 = me.global_position + back * 5.0 + Vector3.UP * 2.6
-		camera.global_position = camera.global_position.lerp(target, clampf(delta * 6.0, 0.0, 1.0))
-		camera.look_at(me.global_position + Vector3.UP * 1.1 - back * 4.0)
+		_follow_camera(me, delta)
 	if _lobby_panel.visible:
 		_update_roster()
 	if multiplayer.is_server() and _opts.has("expect") and race.state == Race.State.LOBBY:
 		if players.get_child_count() >= int(_opts["expect"]):
 			race.host_start()
+
+
+## Camera flow: a face-to-face look at your panda in the lobby, a swoop around to
+## behind during the countdown, a wider, higher view on The Drop, and a slow orbit
+## once you cross the finish.
+func _follow_camera(me, delta: float) -> void:
+	var back: Vector3 = me.global_basis.z
+	var pos: Vector3 = me.global_position
+	var target: Vector3
+	var look: Vector3 = pos + Vector3.UP * 1.3 - back * 4.0
+	var rate := 6.0
+	match race.state:
+		Race.State.LOBBY:
+			target = pos - back * 3.6 + Vector3.UP * 1.9
+			look = pos + Vector3.UP * 1.6
+		Race.State.COUNTDOWN:
+			var k := clampf(1.0 - race.countdown / Race.COUNTDOWN_SECONDS, 0.0, 1.0)
+			var angle := PI * (1.0 - k)                                 # from in front to behind
+			var around := back.rotated(Vector3.UP, angle)
+			target = pos + around * lerpf(3.6, 5.0, k) + Vector3.UP * lerpf(1.9, 2.6, k)
+			look = pos + Vector3.UP * lerpf(1.6, 1.2, k) - back * 4.0 * k
+			rate = 10.0
+		_:
+			if me.finished:
+				_orbit += delta * 0.5
+				target = pos + back.rotated(Vector3.UP, _orbit) * 4.5 + Vector3.UP * 2.2
+				look = pos + Vector3.UP * 1.4
+				rate = 3.0
+			elif me.freestyle_active:
+				target = pos + back * 5.4 + Vector3.UP * 3.3
+				look = pos + Vector3.UP * 1.0 - back * 3.0
+				rate = 8.0
+			else:
+				_orbit = 0.0
+				target = pos + back * 5.0 + Vector3.UP * 2.6
+				rate = 8.0
+	camera.global_position = camera.global_position.lerp(target, clampf(delta * rate, 0.0, 1.0))
+	if not camera.global_position.is_equal_approx(look):
+		camera.look_at(look)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -200,6 +238,8 @@ func _spawn_for(id: int, racer_name: String, bot := false) -> void:
 func _spawn_racer(data: Dictionary) -> Node:
 	var skater := Skater.new()
 	skater.setup(data)
+	if _opts.has("log-tricks"):
+		skater.trick_event.connect(func(text, _kind): print("  [%s] %s" % [skater.racer_name, text]))
 	return skater
 
 
@@ -354,6 +394,8 @@ func _setup_input() -> void:
 	var keys := {
 		"kick": [KEY_W, KEY_UP], "brake": [KEY_S, KEY_DOWN],
 		"steer_left": [KEY_A, KEY_LEFT], "steer_right": [KEY_D, KEY_RIGHT], "ollie": [KEY_SPACE],
+		"trick_flip": [KEY_E], "trick_grab": [KEY_F], "trick_style": [KEY_R], "trick_spin": [KEY_Q],
+		"trick_mod": [KEY_SHIFT], "trick_list": [KEY_TAB],
 	}
 	for action in keys:
 		if InputMap.has_action(action):
@@ -368,9 +410,16 @@ func _setup_input() -> void:
 	_pad_axis("brake", JOY_AXIS_TRIGGER_LEFT, 1.0)
 	_pad_axis("steer_left", JOY_AXIS_LEFT_X, -1.0)
 	_pad_axis("steer_right", JOY_AXIS_LEFT_X, 1.0)
-	var button := InputEventJoypadButton.new()
-	button.button_index = JOY_BUTTON_A
-	InputMap.action_add_event("ollie", button)
+	# A ollies, X flips, Y grabs, B style, RB spins, LB is Shift, Back shows the trick list.
+	var pad_buttons := {
+		"ollie": JOY_BUTTON_A, "trick_flip": JOY_BUTTON_X, "trick_grab": JOY_BUTTON_Y,
+		"trick_style": JOY_BUTTON_B, "trick_spin": JOY_BUTTON_RIGHT_SHOULDER,
+		"trick_mod": JOY_BUTTON_LEFT_SHOULDER, "trick_list": JOY_BUTTON_BACK,
+	}
+	for action in pad_buttons:
+		var button := InputEventJoypadButton.new()
+		button.button_index = pad_buttons[action]
+		InputMap.action_add_event(action, button)
 
 
 func _pad_axis(action: String, axis: JoyAxis, value: float) -> void:
