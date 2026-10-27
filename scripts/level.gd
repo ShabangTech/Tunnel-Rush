@@ -7,6 +7,10 @@ extends Node3D
 ## Wet floors keep your speed, dry floors drag. Zombies claw up out of the floor and
 ## shamble into the lane (they block you), and bats swoop down at head height.
 ##
+## Tokens: gold tokens fill a meter (every 5 fires a Turbo), and rarer power tokens
+## give a Turbo, a Shield or Mega Air straight away. The host decides who grabbed a
+## token and tells everyone, so a token can only be taken once.
+##
 ## Hazards move on the shared race clock, so every peer sees them in the same place
 ## without sending any network traffic.
 
@@ -56,6 +60,20 @@ const BAT_ZONES: Array[Vector2] = [
 ]
 const BAT_COUNT := 15
 
+## Token kinds.
+enum Token { GOLD, TURBO, SHIELD, MEGA_AIR }
+const TOKEN_COLORS := {
+	Token.GOLD: Color("ffcf3a"), Token.TURBO: Color("ff7a1a"),
+	Token.SHIELD: Color("35d0ff"), Token.MEGA_AIR: Color("c46bff"),
+}
+const TOKEN_LETTERS := {Token.TURBO: "T", Token.SHIELD: "S", Token.MEGA_AIR: "A"}
+const TOKEN_RADIUS := 1.15
+const GOLD_RESPAWN := 8.0
+const POWER_RESPAWN := 12.0
+
+var _tokens: Array[Node3D] = []
+var _token_kind: Array[int] = []
+var _token_back_at: Array[float] = []      # local clock time a taken token reappears (-1 = present)
 var _crates: Array[StaticBody3D] = []
 var _zombies: Array[AnimatableBody3D] = []
 var _bats: Array[Node3D] = []
@@ -78,6 +96,7 @@ func _ready() -> void:
 	_build_props()
 	_build_zombies()
 	_build_bats()
+	_build_tokens()
 
 
 func _process(delta: float) -> void:
@@ -88,6 +107,13 @@ func _process(delta: float) -> void:
 	var t := clock()
 	for i in _bats.size():
 		_place_bat(i, t)
+	for i in _tokens.size():
+		var token := _tokens[i]
+		if _token_back_at[i] >= 0.0 and _local_clock >= _token_back_at[i]:
+			_token_back_at[i] = -1.0
+			token.visible = true
+		token.rotation.y = _local_clock * (2.5 if _token_kind[i] == Token.GOLD else 1.6)
+		token.get_child(0).position.y = 0.12 * sin(_local_clock * 3.0 + i)
 
 
 func _physics_process(delta: float) -> void:
@@ -95,6 +121,106 @@ func _physics_process(delta: float) -> void:
 	var t := clock()
 	for i in _zombies.size():
 		_place_zombie(i, t)
+	if multiplayer.is_server():
+		_check_token_pickups()
+
+
+# ------------------------------------------------------------------- tokens
+
+## Host only: hand out any token a racer is touching.
+func _check_token_pickups() -> void:
+	var race = get_node_or_null("/root/Main/Race")
+	var players = get_node_or_null("/root/Main/Players")
+	if race == null or players == null or not race.is_racing():
+		return
+	for i in _tokens.size():
+		if _token_back_at[i] >= 0.0:
+			continue
+		var at: Vector3 = _tokens[i].position
+		for skater in players.get_children():
+			if skater.finished:
+				continue
+			# The rider's body is a ~2 m tall capsule standing on its feet.
+			var feet: Vector3 = skater.global_position
+			var rise := at.y - feet.y
+			if Vector2(at.x - feet.x, at.z - feet.z).length() < TOKEN_RADIUS and rise > -0.4 and rise < 2.3:
+				_take_token.rpc(i)
+				skater.rpc_id(skater.get_multiplayer_authority(), "grant_token", _token_kind[i])
+				break
+
+
+@rpc("authority", "call_local", "reliable")
+func _take_token(index: int) -> void:
+	if index < 0 or index >= _tokens.size():
+		return
+	_tokens[index].visible = false
+	var wait := GOLD_RESPAWN if _token_kind[index] == Token.GOLD else POWER_RESPAWN
+	_token_back_at[index] = _local_clock + wait
+
+
+func reset_tokens() -> void:
+	for i in _tokens.size():
+		_tokens[i].visible = true
+		_token_back_at[i] = -1.0
+
+
+func _build_tokens() -> void:
+	# Gold rows along the straights, a gold arc over each kicker's landing, gold
+	# between the crates and down the final sprint.
+	for z in range(-8, -30, -3):
+		_token(Token.GOLD, Vector3(-1.6 if (z / 3) % 2 == 0 else 1.6, 0, z))
+	for z in range(-33, -52, -3):
+		_token(Token.GOLD, Vector3(0.0, 0, z))
+	for kz in KICKER_Z:
+		for k in 3:
+			var z: float = kz - KICKER_LENGTH - 4.0 - k * 2.5
+			_token(Token.GOLD, Vector3(0, 2.0 + (1.0 if k == 1 else 0.0), z))
+	for z in [-157.0, -167.0, -177.0, -187.0]:
+		_token(Token.GOLD, Vector3(0.6 if int(z) % 2 == 0 else -0.6, 0, z))
+	for z in range(-200, -226, -3):
+		_token(Token.GOLD, Vector3(-2.0 if (z / 3) % 2 == 0 else 2.0, 0, z))
+	# Power tokens where they matter.
+	_token(Token.MEGA_AIR, Vector3(-1.5, 0, -52))       # right before The Drop
+	_token(Token.MEGA_AIR, Vector3(1.5, 0, -52))
+	_token(Token.SHIELD, Vector3(-2.2, 0, -36))         # zombies on the wet straight
+	_token(Token.SHIELD, Vector3(2.4, 0, -146))         # zombies + crates ahead
+	_token(Token.TURBO, Vector3(-2.4, 0, -146))
+	_token(Token.TURBO, Vector3(0, 0, -199))            # after the pit: sprint home
+	_token(Token.SHIELD, Vector3(-2.6, 0, -205))
+
+
+## A token floating at (x, height above the floor, z).
+func _token(kind: int, at: Vector3) -> void:
+	var root := Node3D.new()
+	root.position = Vector3(at.x, floor_y(at.z) + 1.0 + at.y, at.z)
+	var bob := Node3D.new()
+	root.add_child(bob)                                                  # child 0: bobs up and down
+	var color: Color = TOKEN_COLORS[kind]
+	var mat := _material(color, 0.25, 0.6, 2.2 if kind == Token.GOLD else 3.0)
+	if kind == Token.GOLD:
+		var coin := CylinderMesh.new()
+		coin.top_radius = 0.28
+		coin.bottom_radius = 0.28
+		coin.height = 0.07
+		_mesh(bob, coin, Vector3.ZERO, mat).rotation.x = PI / 2.0
+	else:
+		var gem := BoxMesh.new()
+		gem.size = Vector3(0.42, 0.42, 0.42)
+		var g := _mesh(bob, gem, Vector3.ZERO, mat)
+		g.rotation = Vector3(PI / 4.0, 0, PI / 4.0)
+		var letter := Label3D.new()
+		letter.text = TOKEN_LETTERS[kind]
+		letter.font_size = 72
+		letter.outline_size = 14
+		letter.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		letter.no_depth_test = true
+		letter.position.y = 0.55
+		letter.modulate = color.lightened(0.4)
+		bob.add_child(letter)
+	add_child(root)
+	_tokens.append(root)
+	_token_kind.append(kind)
+	_token_back_at.append(-1.0)
 
 
 ## The shared clock hazards run on: the race clock during a race, a local one otherwise.

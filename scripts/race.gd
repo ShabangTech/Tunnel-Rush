@@ -39,6 +39,7 @@ func _begin_countdown() -> void:
 	race_time = 0.0
 	countdown = COUNTDOWN_SECONDS
 	main.level.reset_crates()
+	main.level.reset_tokens()
 	for skater in main.players.get_children():
 		skater.finished = false
 		if skater.is_multiplayer_authority():

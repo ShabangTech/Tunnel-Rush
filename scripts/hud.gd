@@ -7,7 +7,8 @@ const Race := preload("res://scripts/race.gd")
 const Tricks := preload("res://scripts/tricks.gd")
 const CALLOUT_COLORS := {
 	"trick": Color("7cff6b"), "bail": Color("ff5a36"), "freestyle": Color("d38cff"),
-	"boost": Color("ffd23f"), "info": Color("e8e2d4"),
+	"boost": Color("ffd23f"), "info": Color("e8e2d4"), "token": Color("ffcf3a"),
+	"shield": Color("35d0ff"),
 }
 
 var main
@@ -25,6 +26,8 @@ var _callout: Label
 var _callout_hold := 0.0
 var _trick_list: Label
 var _listening_to: Node
+var _tokens: Label
+var _powers: Label
 
 
 func _ready() -> void:
@@ -51,6 +54,11 @@ func _ready() -> void:
 	_trick_list.size = Vector2(360, 560)
 	_trick_list.text = "TRICK BOOK (in the air)\n\n" + "\n".join(Tricks.trick_list())
 	_trick_list.visible = false
+	_tokens = _label(Vector2(24, 584), 22, HORIZONTAL_ALIGNMENT_LEFT)
+	_tokens.size = Vector2(320, 30)
+	_tokens.modulate = Color("ffcf3a")
+	_powers = _label(Vector2(856, 108), 22, HORIZONTAL_ALIGNMENT_RIGHT)
+	_powers.size = Vector2(400, 100)
 	_hint.modulate = Color(1, 1, 1, 0.6)
 	main.race.racer_finished.connect(_on_racer_finished)
 	main.race.results_ready.connect(_on_results)
@@ -75,6 +83,18 @@ func _process(delta: float) -> void:
 			pips += "● " if i < mini(me.kicks, 3) else "○ "
 		_kicks.text = "KICK  " + pips
 		_place.text = _place_text(me)
+		var meter := ""
+		for i in me.GOLD_FOR_TURBO:
+			meter += "◆" if i < me.gold else "◇"
+		_tokens.text = "TOKENS %s  (%d)" % [meter, me.gold_total]
+		var active := PackedStringArray()
+		if me.turbo_on:
+			active.append("TURBO %.1f" % me.turbo_left)
+		if me.shield_on:
+			active.append("SHIELD %.0f" % me.shield_left)
+		if me.mega_air_on:
+			active.append("MEGA AIR %.0f" % me.mega_air_left)
+		_powers.text = "\n".join(active)
 	_clock.text = Race.format_time(race.race_time)
 	if _callout_hold > 0.0:
 		_callout_hold -= delta

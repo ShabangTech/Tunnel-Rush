@@ -1,5 +1,5 @@
 extends CharacterBody3D
-## One racer: a Big Head Panda on a skateboard. The peer that owns it simulates it
+## One racer: a Big Head animal on a skateboard. The peer that owns it simulates it
 ## (bots belong to the host); every other peer sees a synced copy and animates it.
 ##
 ## Kick rhythm: holding kick makes the 1st kick-off start you, the 2nd follow, and the
@@ -14,11 +14,15 @@ extends CharacterBody3D
 ##
 ## Hazards: zombies climb out of the ground (they block you like a wall), and bats
 ## swoop low enough to spook you.
+##
+## Tokens (handed out by the host): every 5 gold tokens fire a Turbo; power tokens
+## give a Turbo (burst of speed), a Shield (shrugs off the next zombie, bat or crash)
+## or Mega Air (bigger ollies, so bigger tricks).
 
 signal trick_event(text: String, kind: String)   # local feedback for the HUD
 
 const Level := preload("res://scripts/level.gd")
-const Panda := preload("res://scripts/panda.gd")
+const Rider := preload("res://scripts/rider.gd")
 const Tricks := preload("res://scripts/tricks.gd")
 
 const TOP_SPEED := 8.0
@@ -40,6 +44,13 @@ const SPIN_RATE := TAU * 2.6       # radians per second while spinning (a 1080 n
 const LAND_TOLERANCE := 0.5       # radians short of a half turn still counted as clean
 const AIR_POINTS_PER_SECOND := 60.0
 const POINTS_PER_BOOST := 150.0   # freestyle points per m/s of boost
+const GOLD_FOR_TURBO := 5
+const TURBO_TIME := 2.5
+const TURBO_SPEED := TOP_SPEED * OVERSPEED + 2.5
+const TURBO_ACCEL := 12.0
+const SHIELD_TIME := 10.0
+const MEGA_AIR_TIME := 8.0
+const MEGA_AIR_FACTOR := 1.45
 
 var peer_id := 1
 var is_bot := false
@@ -47,6 +58,7 @@ var autopilot := false
 var slot := 0
 var racer_name := "Skater"
 var color := Color.WHITE
+var animal := "Panda"
 
 # Synced to every peer (drives the animation).
 var speed := 0.0
@@ -56,10 +68,20 @@ var spin := 0.0                   # body + board yaw (a multiple of PI on the gr
 var board_roll := 0.0
 var board_yaw := 0.0
 var board_pitch := 0.0
-var pose := 0                     # grab / style pose id (see panda.gd)
+var pose := 0                     # grab / style pose id (see rider.gd)
 var pose_t := 0.0                 # 0..1 progress of a style trick
 var airborne := false
 var bail_t := 0.0
+var turbo_on := false
+var shield_on := false
+var mega_air_on := false
+
+# Tokens (owner only).
+var gold := 0
+var gold_total := 0
+var turbo_left := 0.0
+var shield_left := 0.0
+var mega_air_left := 0.0
 
 var heading := 0.0
 var kicks := 0
@@ -73,7 +95,7 @@ var freestyle_left := 0.0
 var freestyle_score := 0.0
 var _freestyle_done := false
 
-var _panda: Node3D
+var _rider: Node3D
 var _kicking := false
 var _kick_t := 0.0
 var _kick_len := 0.0
@@ -96,6 +118,9 @@ var _grab_time := 0.0
 var _jump_tricks: Array[String] = []
 var _jump_points := 0.0
 var _hazard_cooldown := 0.0
+var _crate_push := 0.0            # seconds spent shoving a crate at low speed
+var _stuck_check_z := 0.0
+var _stuck_timer := 0.0
 
 
 ## Called by the spawner on every peer with the same data.
@@ -105,6 +130,7 @@ func setup(data: Dictionary) -> void:
 	slot = data.slot
 	racer_name = data.name
 	color = data.color
+	animal = data.get("animal", "Panda")
 	name = "P%d" % peer_id
 	_bot_lane = GRID_X[slot % GRID_X.size()]
 	floor_snap_length = 0.5
@@ -131,6 +157,14 @@ func reset_to_grid() -> void:
 	_freestyle_done = false
 	_clear_tricks()
 	spin = 0.0
+	gold = 0
+	gold_total = 0
+	turbo_left = 0.0
+	shield_left = 0.0
+	mega_air_left = 0.0
+	turbo_on = false
+	shield_on = false
+	mega_air_on = false
 
 
 static func grid_position(grid_slot: int) -> Vector3:
@@ -142,11 +176,12 @@ func forward() -> Vector3:
 
 
 func _process(delta: float) -> void:
-	if _panda:
-		_panda.animate(delta, {
+	if _rider:
+		_rider.animate(delta, {
 			"kick_phase": kick_phase, "lean": lean, "spin": spin, "roll": board_roll,
 			"yaw": board_yaw, "pitch": board_pitch, "pose": pose, "pose_t": pose_t,
 			"air": airborne, "bail": bail_t,
+			"turbo": turbo_on, "shield": shield_on, "mega_air": mega_air_on,
 		})
 
 
@@ -166,6 +201,7 @@ func _physics_process(delta: float) -> void:
 	var fwd := forward()
 	lean = lerpf(lean, -cmd.steer * 0.32 * clampf(speed / TOP_SPEED, 0.0, 1.0), clampf(delta * 6.0, 0.0, 1.0))
 	bail_t = maxf(bail_t - delta, 0.0)
+	_update_powers(delta)
 
 	if is_on_floor():
 		_update_kick(cmd.kick, delta)
@@ -173,19 +209,21 @@ func _physics_process(delta: float) -> void:
 		var downhill := Vector3.DOWN.slide(n).dot(fwd) * GRAVITY
 		if absf(downhill) > 0.05:
 			speed += downhill * SLOPE_GAIN * delta
-		if not _kicking:
+		if turbo_on:
+			speed = move_toward(speed, TURBO_SPEED, TURBO_ACCEL * delta)
+		elif not _kicking:
 			speed -= _floor_drag * delta
 		if cmd.brake:
 			speed -= BRAKE * delta
 			_kicking = false
-		if speed > TOP_SPEED and downhill <= 0.05:
+		if speed > TOP_SPEED and downhill <= 0.05 and not turbo_on:
 			speed = move_toward(speed, TOP_SPEED, 1.0 * delta)          # extra speed bleeds off
 		speed = clampf(speed, 0.0, TOP_SPEED * OVERSPEED + MAX_BOOST)
 		# Ride along the surface, so a kicker throws you up and a slope carries you down.
 		var along := (fwd * speed).slide(n)
 		velocity = along.normalized() * speed if along.length() > 0.001 else Vector3.ZERO
 		if cmd.ollie:
-			velocity.y += OLLIE_VELOCITY
+			velocity.y += OLLIE_VELOCITY * (MEGA_AIR_FACTOR if mega_air_on else 1.0)
 	else:
 		velocity.x = fwd.x * speed
 		velocity.z = fwd.z * speed
@@ -203,11 +241,13 @@ func _physics_process(delta: float) -> void:
 
 func _after_move(fwd: Vector3, delta: float) -> void:
 	_crash_cooldown = maxf(_crash_cooldown - delta, 0.0)
+	var pushing_crate := false
 	_hazard_cooldown = maxf(_hazard_cooldown - delta, 0.0)
 	if _hazard_cooldown == 0.0 and _level().bat_hits(global_position + Vector3.UP * 1.6):
 		_hazard_cooldown = 1.5
-		speed *= 0.85
-		trick_event.emit("BATS!", "bail")
+		if not _use_shield("BATS"):
+			speed *= 0.85
+			trick_event.emit("BATS!", "bail")
 	for i in get_slide_collision_count():
 		var hit := get_slide_collision(i)
 		var n := hit.get_normal()
@@ -216,7 +256,9 @@ func _after_move(fwd: Vector3, delta: float) -> void:
 			_floor_drag = Level.drag_of(collider)
 			continue
 		if collider and collider.has_meta("zombie"):
-			if _hazard_cooldown == 0.0:
+			if _hazard_cooldown == 0.0 and _use_shield("ZOMBIE"):
+				_hazard_cooldown = 1.0
+			elif _hazard_cooldown == 0.0:
 				_hazard_cooldown = 1.0
 				speed *= 0.6
 				kicks = 0
@@ -224,17 +266,26 @@ func _after_move(fwd: Vector3, delta: float) -> void:
 				bail_t = 0.5
 				trick_event.emit("ZOMBIE!", "bail")
 			continue
+		# Shoving a crate slowly: it gives way after a moment, so nobody gets wedged.
+		if collider and collider.has_meta("crate") and absf(n.y) < 0.5:
+			pushing_crate = true
+			if _crate_push > 0.6:
+				_level().rpc("break_crate", collider.get_meta("crate"))
+				_crate_push = 0.0
+				trick_event.emit("SMASH!", "info")
+				continue
 		if absf(n.y) < 0.5 and n.dot(fwd) < -0.6 and speed > 2.0 and _crash_cooldown == 0.0:
 			_crash_cooldown = 0.4
 			if collider and collider.has_meta("crate") and speed >= CRATE_SMASH_SPEED:
 				_level().rpc("break_crate", collider.get_meta("crate"))
 				speed *= 0.75
 				trick_event.emit("SMASH!", "info")
-			else:
+			elif not _use_shield("WALL"):
 				speed *= CRASH_KEEP
 				kicks = 0
 				_kicking = false
 
+	_crate_push = _crate_push + delta if pushing_crate else 0.0
 	var on_floor := is_on_floor()
 	if on_floor and airborne:
 		_land()
@@ -257,6 +308,54 @@ func _respawn() -> void:
 	spin = 0.0
 	airborne = false
 	trick_event.emit("SPLASH! Back to the checkpoint", "bail")
+
+
+# -------------------------------------------------------------- tokens / powers
+
+## Sent by the host to whoever drives this racer when it touches a token.
+@rpc("any_peer", "call_local", "reliable")
+func grant_token(kind: int) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 1 and not (sender == 0 and multiplayer.is_server()):
+		return                                             # only the host hands out tokens
+	match kind:
+		Level.Token.GOLD:
+			gold += 1
+			gold_total += 1
+			if gold >= GOLD_FOR_TURBO:
+				gold = 0
+				turbo_left = TURBO_TIME
+				trick_event.emit("TOKEN TURBO!", "boost")
+			else:
+				trick_event.emit("+1 TOKEN  (%d/%d)" % [gold, GOLD_FOR_TURBO], "token")
+		Level.Token.TURBO:
+			turbo_left = TURBO_TIME
+			trick_event.emit("TURBO!", "boost")
+		Level.Token.SHIELD:
+			shield_left = SHIELD_TIME
+			trick_event.emit("SHIELD UP!", "shield")
+		Level.Token.MEGA_AIR:
+			mega_air_left = MEGA_AIR_TIME
+			trick_event.emit("MEGA AIR!", "freestyle")
+
+
+func _update_powers(delta: float) -> void:
+	turbo_left = maxf(turbo_left - delta, 0.0)
+	shield_left = maxf(shield_left - delta, 0.0)
+	mega_air_left = maxf(mega_air_left - delta, 0.0)
+	turbo_on = turbo_left > 0.0
+	shield_on = shield_left > 0.0
+	mega_air_on = mega_air_left > 0.0
+
+
+## Spends the shield on a hit, if there is one. Returns true when it saved you.
+func _use_shield(what: String) -> bool:
+	if shield_left <= 0.0:
+		return false
+	shield_left = 0.0
+	shield_on = false
+	trick_event.emit("SHIELD BLOCKED %s!" % what, "shield")
+	return true
 
 
 # ------------------------------------------------------------------- tricks
@@ -492,6 +591,14 @@ func _bot_input() -> Dictionary:
 	var cmd := _idle_cmd()
 	cmd.kick = true
 
+	# Unstick: if a bot hasn't made progress for a second, swap to the other side.
+	_stuck_timer += get_physics_process_delta_time()
+	if _stuck_timer > 1.0:
+		if pos.z > _stuck_check_z - 1.0:
+			_bot_lane = -2.4 if pos.x > 0.0 else 2.4
+		_stuck_check_z = pos.z
+		_stuck_timer = 0.0
+
 	if Level.in_freestyle_zone(pos.z + 3.0):
 		target_x = clampf(_bot_lane, -1.2, 1.2)                     # stay on the kickers
 		for kz in Level.KICKER_Z:
@@ -539,14 +646,14 @@ func _build() -> void:
 	shape.position.y = 0.95
 	add_child(shape)
 
-	_panda = Panda.new()
-	_panda.name = "Panda"
-	add_child(_panda)
-	_panda.build(color)
+	_rider = Rider.new()
+	_rider.name = "Rider"
+	add_child(_rider)
+	_rider.build(color, animal)
 
 	var label := Label3D.new()
 	label.text = racer_name
-	label.position.y = 2.75
+	label.position.y = _rider.head_top + 0.45
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	label.font_size = 48
 	label.outline_size = 10
@@ -558,7 +665,8 @@ func _build() -> void:
 	sync.name = "Sync"
 	var config := SceneReplicationConfig.new()
 	for prop in [":position", ":rotation", ":speed", ":kick_phase", ":lean", ":spin",
-			":board_roll", ":board_yaw", ":board_pitch", ":pose", ":pose_t", ":airborne", ":bail_t"]:
+			":board_roll", ":board_yaw", ":board_pitch", ":pose", ":pose_t", ":airborne", ":bail_t",
+			":turbo_on", ":shield_on", ":mega_air_on"]:
 		var path := NodePath("." + prop)
 		config.add_property(path)
 		config.property_set_replication_mode(path, SceneReplicationConfig.REPLICATION_MODE_ALWAYS)

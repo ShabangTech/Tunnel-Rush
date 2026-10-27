@@ -5,6 +5,8 @@ extends Node
 ## Command line (after --), handy for testing:
 ##   --solo | --host | --join=IP     how to start
 ##   --name=NAME  --bots=N           your name; bots the host adds
+##   --animal=Zebra                  Panda, Zebra, Bear, Giraffe, Alligator or Peacock
+##   --showcase                      line up all six animals for a screenshot
 ##   --expect=N                      host starts the race once N racers are in
 ##   --autopilot                     your skater drives itself
 ##   --quit-after-race               print the results and quit
@@ -17,6 +19,7 @@ const Level := preload("res://scripts/level.gd")
 const Skater := preload("res://scripts/skater.gd")
 const Race := preload("res://scripts/race.gd")
 const Hud := preload("res://scripts/hud.gd")
+const Rider := preload("res://scripts/rider.gd")
 const COLORS: Array[Color] = [Color("ff5a36"), Color("2fb8ff"), Color("ffd23f"), Color("7cff6b")]
 const BOT_NAMES: Array[String] = ["Drip", "Grate", "Rat King", "Splash"]
 
@@ -35,6 +38,7 @@ var _menu: CanvasLayer
 var _main_panel: PanelContainer
 var _lobby_panel: PanelContainer
 var _name_edit: LineEdit
+var _animal_pick: OptionButton
 var _ip_edit: LineEdit
 var _status: Label
 var _roster: Label
@@ -94,6 +98,8 @@ func _take_shots(times: PackedStringArray) -> void:
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png("user://shot_%s.png" % t)
 		print("[shot] " + ProjectSettings.globalize_path("user://shot_%s.png" % t))
+	if _opts.has("showcase"):
+		get_tree().quit()
 
 
 func _process(delta: float) -> void:
@@ -166,7 +172,7 @@ func local_skater():
 
 func start_solo() -> void:
 	_in_session = true
-	_spawn_for(1, _name())
+	_spawn_for(1, _name(), false, _animal())
 	for i in MAX_RACERS - 1:
 		add_bot()
 	_show_lobby()
@@ -181,7 +187,7 @@ func start_host() -> void:
 		return
 	multiplayer.multiplayer_peer = peer
 	_in_session = true
-	_spawn_for(1, _name())
+	_spawn_for(1, _name(), false, _animal())
 	print("[host] listening on port %d" % PORT)
 	_show_lobby()
 
@@ -199,20 +205,20 @@ func start_join(address: String) -> void:
 func add_bot() -> void:
 	if not multiplayer.is_server() or _free_slot() < 0 or race.state != Race.State.LOBBY and race.state != Race.State.RESULTS:
 		return
-	_spawn_for(1001 + _next_bot, BOT_NAMES[_next_bot % BOT_NAMES.size()], true)
+	_spawn_for(1001 + _next_bot, BOT_NAMES[_next_bot % BOT_NAMES.size()], true, _free_animal())
 	_next_bot += 1
 
 
 func _on_connected() -> void:
 	_in_session = true
-	_register.rpc_id(1, _name())
+	_register.rpc_id(1, _name(), _animal())
 	print("[client] connected as peer %d" % multiplayer.get_unique_id())
 	_show_lobby()
 
 
 ## A joining player tells the host their name; the host gives them a spot on the grid.
 @rpc("any_peer", "reliable")
-func _register(player_name: String) -> void:
+func _register(player_name: String, animal := "Panda") -> void:
 	if not multiplayer.is_server():
 		return
 	var id := multiplayer.get_remote_sender_id()
@@ -222,17 +228,36 @@ func _register(player_name: String) -> void:
 		if peer:
 			peer.disconnect_peer(id)
 		return
-	_spawn_for(id, player_name.strip_edges().left(14))
+	_spawn_for(id, player_name.strip_edges().left(14), false, animal if animal in Rider.ANIMALS else "Panda")
 	print("[host] %s joined (peer %d)" % [player_name, id])
 
 
-func _spawn_for(id: int, racer_name: String, bot := false) -> void:
+func _spawn_for(id: int, racer_name: String, bot := false, animal := "Panda") -> void:
 	var grid_slot := _free_slot()
 	spawner.spawn({
 		"id": id, "bot": bot, "slot": grid_slot,
 		"name": racer_name if racer_name != "" else "Skater %d" % (grid_slot + 1),
-		"color": COLORS[grid_slot],
+		"color": COLORS[grid_slot], "animal": animal,
 	})
+
+
+## An animal nobody on the grid is riding yet (bots get these).
+func _free_animal() -> String:
+	var taken := []
+	for skater in players.get_children():
+		taken.append(skater.animal)
+	var free := Rider.ANIMALS.filter(func(a): return a not in taken)
+	return free.pick_random() if not free.is_empty() else Rider.ANIMALS.pick_random()
+
+
+## The animal picked in the menu (or on the command line).
+func _animal() -> String:
+	var choice := str(_opts.get("animal", ""))
+	if choice == "" and _animal_pick:
+		choice = _animal_pick.get_item_text(_animal_pick.selected)
+	if choice in Rider.ANIMALS:
+		return choice
+	return Rider.ANIMALS.pick_random()                    # "Random"
 
 
 func _spawn_racer(data: Dictionary) -> Node:
@@ -304,7 +329,7 @@ func _show_lobby() -> void:
 func _update_roster() -> void:
 	var text := ""
 	for skater in players.get_children():
-		text += "%s%s\n" % [skater.racer_name, "  (bot)" if skater.is_bot else ""]
+		text += "%s  the %s%s\n" % [skater.racer_name, skater.animal, "  (bot)" if skater.is_bot else ""]
 	_roster.text = text
 	_bot_button.disabled = _free_slot() < 0
 
@@ -327,6 +352,11 @@ func _build_menu() -> void:
 	_name_edit.text = _opts.get("name", "")
 	_name_edit.max_length = 14
 	box.add_child(_name_edit)
+	_animal_pick = OptionButton.new()
+	for a in Rider.ANIMALS:
+		_animal_pick.add_item(a)
+	_animal_pick.add_item("Random")
+	box.add_child(_animal_pick)
 	_button(box, "Race the bots", start_solo)
 	_button(box, "Host an online race", start_host)
 	var row := HBoxContainer.new()
@@ -429,6 +459,29 @@ func _pad_axis(action: String, axis: JoyAxis, value: float) -> void:
 	InputMap.action_add_event(action, motion)
 
 
+## All six animals in a row on the start line, facing the camera.
+func _showcase() -> void:
+	_menu.visible = false
+	var row := Node3D.new()
+	add_child(row)
+	for i in Rider.ANIMALS.size():
+		var rider := Rider.new()
+		row.add_child(rider)
+		rider.build(COLORS[i % COLORS.size()], Rider.ANIMALS[i])
+		rider.position = Vector3(-3.0 + i * 1.2, 0.0, -6.0)
+		rider.rotation.y = PI * 0.82                          # three-quarter view
+		var tag := Label3D.new()
+		tag.text = Rider.ANIMALS[i]
+		tag.font_size = 40
+		tag.outline_size = 8
+		tag.position = Vector3(0, rider.head_top + 0.35, 0)
+		tag.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		rider.add_child(tag)
+	camera.position = Vector3(0, 2.0, -1.4)
+	camera.look_at(Vector3(0, 1.45, -6.0))
+	set_process(false)
+
+
 func _parse_args() -> void:
 	for arg in OS.get_cmdline_user_args():
 		var parts := arg.trim_prefix("--").split("=", true, 1)
@@ -436,7 +489,9 @@ func _parse_args() -> void:
 
 
 func _run_cli() -> void:
-	if _opts.has("solo"):
+	if _opts.has("showcase"):
+		_showcase()
+	elif _opts.has("solo"):
 		start_solo()
 	elif _opts.has("host"):
 		start_host()
