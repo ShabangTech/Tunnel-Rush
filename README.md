@@ -95,4 +95,4 @@ scripts/hud.gd     speed, kicks, clock, position, results
 
 ## Credits
 
-By ShabangTech. Every model, including all six riders, zombies, bats and tokens, is generated in code; no third-party assets.
+By Shabang and the Zoo. Every model, including all six riders, zombies, bats and tokens, is generated in code; no third-party assets.
