@@ -8,7 +8,7 @@ const Tricks := preload("res://scripts/tricks.gd")
 const CALLOUT_COLORS := {
 	"trick": Color("7cff6b"), "bail": Color("ff5a36"), "freestyle": Color("d38cff"),
 	"boost": Color("ffd23f"), "info": Color("e8e2d4"), "token": Color("ffcf3a"),
-	"shield": Color("35d0ff"),
+	"shield": Color("35d0ff"), "teaser": Color("6ff6ff"),
 }
 
 var main
@@ -67,6 +67,10 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	if _teaser and _teaser.visible:
+		_teaser_t -= delta
+		_teaser.modulate.a = clampf(_teaser_t / 1.0, 0.0, 1.0)
+		_teaser.visible = _teaser_t > 0.0
 	if not visible:
 		return
 	var race = main.race
@@ -130,9 +134,52 @@ func _on_state_changed(state: int) -> void:
 
 
 func _on_trick_event(text: String, kind: String) -> void:
+	if kind == "teaser":
+		_show_teaser()
 	_callout.text = text
 	_callout.modulate = CALLOUT_COLORS.get(kind, Color.WHITE)
 	_callout_hold = 2.0 if kind == "boost" else 1.4
+
+
+## The hidden SIGNAL token: a card from the next game.
+var _teaser: Control
+var _teaser_t := 0.0
+
+
+func _show_teaser() -> void:
+	if _teaser == null:
+		_teaser = Control.new()
+		_teaser.name = "Teaser_Card"
+		_teaser.set_anchors_preset(Control.PRESET_FULL_RECT)
+		_teaser.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(_teaser)
+		var bg := ColorRect.new()
+		bg.color = Color(0.01, 0.02, 0.03, 0.82)
+		bg.set_anchors_preset(Control.PRESET_CENTER)
+		bg.offset_left = -330
+		bg.offset_right = 330
+		bg.offset_top = -120
+		bg.offset_bottom = 120
+		_teaser.add_child(bg)
+		var lines := [["A.T.L.A.S.", 84, Color("6ff6ff"), -110], ["COMING SOON", 30, Color("e8e2d4"), 0],
+			["you found the signal", 18, Color("b48cff"), 48]]
+		for l in lines:
+			var lab := Label.new()
+			lab.text = l[0]
+			lab.add_theme_font_size_override("font_size", l[1])
+			lab.add_theme_color_override("font_color", l[2])
+			lab.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+			lab.add_theme_constant_override("outline_size", 10)
+			lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			lab.set_anchors_preset(Control.PRESET_CENTER)
+			lab.offset_left = -330
+			lab.offset_right = 330
+			lab.offset_top = l[3]
+			lab.offset_bottom = l[3] + 100
+			_teaser.add_child(lab)
+	_teaser.visible = true
+	_teaser.modulate.a = 1.0
+	_teaser_t = 5.0
 
 
 func _on_racer_finished(racer_name: String, place: int, time: float) -> void:

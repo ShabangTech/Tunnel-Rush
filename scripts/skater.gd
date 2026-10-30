@@ -29,7 +29,15 @@ const TOP_SPEED := 8.0
 const KICK_TIERS: Array[float] = [0.38, 0.72, 1.0]     # share of top speed each kick reaches
 const KICK_TIMES: Array[float] = [1.1, 0.63, 0.63]     # seconds per kick
 const PUSH_SHARE := 0.6                                # the push is done by 60% of the kick
-const SLOPE_GAIN := 0.5
+const SLOPE_GAIN := 0.65
+## Momentum (arcade-blend physics, 2026-10-30): air drag grows with speed (v^2), carving at
+## speed scrubs a little off, a full-speed slam into a wall or a brutal landing bails you,
+## a glancing hit just scrapes you along the wall, and racers shoulder-bump.
+const AIR_DRAG := 0.003           # k in a = k * v^2
+const ROLL_SHARE := 0.7           # share of the floor's coast drag that's rolling resistance
+const CARVE_LOSS := 0.05          # share of speed lost per radian carved at speed
+const SLAM_SPEED := 9.0           # m/s head-on into a wall that throws you off
+const HARD_LANDING := 14.0        # m/s straight down that throws you off (arcade-forgiving)
 const OVERSPEED := 1.35
 const MAX_BOOST := 3.0
 const BRAKE := 8.0
@@ -105,6 +113,8 @@ var _kick_idle := 0.0
 var _floor_drag := Level.DRAG_DRY
 var _bot_lane := 0.0
 var _crash_cooldown := 0.0
+var _vy_before := 0.0
+var found_signal := false         # grabbed the hidden cyan token (a teaser for the next game)
 var _air_time := 0.0
 var _spinning := false
 var _spin_this_jump := 0.0        # radians spun since take-off
@@ -197,6 +207,8 @@ func _physics_process(delta: float) -> void:
 		cmd.brake = finished and speed > 3.0
 
 	heading -= cmd.steer * TURN_RATE * delta
+	if is_on_floor() and speed > 3.0:
+		speed -= CARVE_LOSS * absf(cmd.steer * TURN_RATE * delta) * speed      # carving costs a little
 	rotation = Vector3(0.0, heading, 0.0)
 	var fwd := forward()
 	lean = lerpf(lean, -cmd.steer * 0.32 * clampf(speed / TOP_SPEED, 0.0, 1.0), clampf(delta * 6.0, 0.0, 1.0))
@@ -212,7 +224,7 @@ func _physics_process(delta: float) -> void:
 		if turbo_on:
 			speed = move_toward(speed, TURBO_SPEED, TURBO_ACCEL * delta)
 		elif not _kicking:
-			speed -= _floor_drag * delta
+			speed -= (_floor_drag * ROLL_SHARE + AIR_DRAG * speed * speed) * delta
 		if cmd.brake:
 			speed -= BRAKE * delta
 			_kicking = false
@@ -230,6 +242,7 @@ func _physics_process(delta: float) -> void:
 		velocity.y -= GRAVITY * delta
 		_update_tricks(cmd, delta)
 
+	_vy_before = velocity.y
 	move_and_slide()
 	_after_move(fwd, delta)
 	kick_phase = clampf(_kick_t / _kick_len, 0.0, 1.0) if _kicking else 0.0
@@ -274,6 +287,14 @@ func _after_move(fwd: Vector3, delta: float) -> void:
 				_crate_push = 0.0
 				trick_event.emit("SMASH!", "info")
 				continue
+		# Another racer: a shoulder bump (each racer's own game handles its side).
+		if collider and collider != self and collider.has_method("grant_token") and absf(n.y) < 0.5:
+			if _crash_cooldown == 0.0:
+				_crash_cooldown = 0.5
+				speed *= 0.85
+				heading += 0.12 * signf(n.cross(fwd).y)
+				trick_event.emit("BUMP!", "info")
+			continue
 		if absf(n.y) < 0.5 and n.dot(fwd) < -0.6 and speed > 2.0 and _crash_cooldown == 0.0:
 			_crash_cooldown = 0.4
 			if collider and collider.has_meta("crate") and speed >= CRATE_SMASH_SPEED:
@@ -281,9 +302,21 @@ func _after_move(fwd: Vector3, delta: float) -> void:
 				speed *= 0.75
 				trick_event.emit("SMASH!", "info")
 			elif not _use_shield("WALL"):
-				speed *= CRASH_KEEP
+				if speed >= SLAM_SPEED:
+					speed *= 0.15                            # full speed into a wall: off the board
+					bail_t = 1.0
+					trick_event.emit("SLAM!", "bail")
+				else:
+					speed *= CRASH_KEEP
 				kicks = 0
 				_kicking = false
+		elif absf(n.y) < 0.5 and n.dot(fwd) < -0.12 and speed > 2.0 and _crash_cooldown == 0.0:
+			# A glancing hit: scrape along the wall, turned parallel to it.
+			_crash_cooldown = 0.2
+			var along := fwd.slide(Vector3(n.x, 0.0, n.z).normalized())
+			if along.length() > 0.01:
+				heading = atan2(-along.x, -along.z)
+			speed *= 0.93
 
 	_crate_push = _crate_push + delta if pushing_crate else 0.0
 	var on_floor := is_on_floor()
@@ -337,6 +370,9 @@ func grant_token(kind: int) -> void:
 		Level.Token.MEGA_AIR:
 			mega_air_left = MEGA_AIR_TIME
 			trick_event.emit("MEGA AIR!", "freestyle")
+		Level.Token.SIGNAL:
+			found_signal = true
+			trick_event.emit("...SIGNAL ACQUIRED", "teaser")
 
 
 func _update_powers(delta: float) -> void:
@@ -437,6 +473,14 @@ func _bank_trick(trick_name: String, points: float) -> void:
 
 func _land() -> void:
 	_end_grab()
+	if _vy_before < -HARD_LANDING and not _use_shield("LANDING"):
+		speed *= 0.3
+		bail_t = 1.0
+		kicks = 0
+		trick_event.emit("SLAMMED!", "bail")
+		spin = roundf(spin / PI) * PI
+		_clear_tricks()
+		return
 	var spin_short := 0.0
 	if _spin_this_jump > 0.3:
 		var nearest := roundf(_spin_this_jump / PI) * PI

@@ -61,12 +61,18 @@ const BAT_ZONES: Array[Vector2] = [
 const BAT_COUNT := 15
 
 ## Token kinds.
-enum Token { GOLD, TURBO, SHIELD, MEGA_AIR }
+enum Token { GOLD, TURBO, SHIELD, MEGA_AIR, SIGNAL }
 const TOKEN_COLORS := {
 	Token.GOLD: Color("ffcf3a"), Token.TURBO: Color("ff7a1a"),
-	Token.SHIELD: Color("35d0ff"), Token.MEGA_AIR: Color("c46bff"),
+	Token.SHIELD: Color("35d0ff"), Token.MEGA_AIR: Color("c46bff"), Token.SIGNAL: Color("6ff6ff"),
 }
-const TOKEN_LETTERS := {Token.TURBO: "T", Token.SHIELD: "S", Token.MEGA_AIR: "A"}
+const TOKEN_LETTERS := {Token.TURBO: "T", Token.SHIELD: "S", Token.MEGA_AIR: "A", Token.SIGNAL: "?"}
+
+## Easter eggs (a few things in this tunnel aren't from this tunnel). The hidden SIGNAL token floats
+## high over the last kicker's landing: you need Mega Air and full speed to reach it, and it doesn't
+## come back once someone has it.
+const SIGNAL_TOKEN_HEIGHT := 6.6
+
 const TOKEN_RADIUS := 1.15
 const GOLD_RESPAWN := 8.0
 const POWER_RESPAWN := 12.0
@@ -97,6 +103,7 @@ func _ready() -> void:
 	_build_lights()
 	_build_props()
 	_build_drain_glow()
+	_build_easter_eggs()
 	_build_zombies()
 	_build_bats()
 	_build_tokens()
@@ -159,6 +166,8 @@ func _take_token(index: int) -> void:
 		return
 	_tokens[index].visible = false
 	var wait := GOLD_RESPAWN if _token_kind[index] == Token.GOLD else POWER_RESPAWN
+	if _token_kind[index] == Token.SIGNAL:
+		wait = 1e9                                   # one per race
 	_token_back_at[index] = _local_clock + wait
 
 
@@ -191,6 +200,8 @@ func _build_tokens() -> void:
 	_token(Token.TURBO, Vector3(-2.4, 0, -146))
 	_token(Token.TURBO, Vector3(0, 0, -199))            # after the pit: sprint home
 	_token(Token.SHIELD, Vector3(-2.6, 0, -205))
+	# The hidden one.
+	_token(Token.SIGNAL, Vector3(0, SIGNAL_TOKEN_HEIGHT, KICKER_Z[2] - KICKER_LENGTH - 5.5))
 
 
 ## A token floating at (x, height above the floor, z).
@@ -600,6 +611,28 @@ func _finish_strip() -> void:
 		tile.material_override = _material(Color.WHITE if i % 2 == 0 else Color.BLACK, 0.6)
 		tile.position = Vector3(-3.5 + i, LOW_TOP + 0.01, FINISH_Z)
 		add_child(tile)
+
+
+## Easter eggs: POPDAT tags sprayed on the walls (the cyan glow is the storm-drain grate above).
+func _build_easter_eggs() -> void:
+	_tag("POPDAT", Vector3(LANE_HALF_WIDTH - 0.02, 1.7, -18.0), -1, Color("ff4fc8"))
+	_tag("POPDAT", Vector3(-LANE_HALF_WIDTH + 0.02, LOW_TOP + 2.0, -150.0), 1, Color("35f0ff"))
+	_tag("POPDAT", Vector3(LANE_HALF_WIDTH - 0.02, LOW_TOP + 1.8, -214.0), -1, Color("ffd23f"))
+
+
+func _tag(text: String, pos: Vector3, facing_x: int, color: Color) -> void:
+	var label := Label3D.new()
+	label.name = "Tag_" + text
+	label.text = text
+	label.font_size = 150
+	label.pixel_size = 0.006
+	label.outline_size = 30
+	label.outline_modulate = Color("101014")
+	label.modulate = color
+	label.position = pos
+	label.rotation = Vector3(0, PI / 2.0 if facing_x > 0 else -PI / 2.0, 0.08 * sin(pos.z))
+	label.add_to_group("popdat_tags")
+	add_child(label)
 
 
 func _sign(text: String, pos: Vector3, color: Color, font_size := 160) -> void:

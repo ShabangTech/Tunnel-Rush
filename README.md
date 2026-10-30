@@ -41,7 +41,9 @@ Pick your **Big Head** rider: **Panda, Zebra, Bear, Giraffe, Alligator or Peacoc
 **Floors:** wet floors keep your speed; dry floors drag. Downhills speed you up without kicking.
 **The Drop:** the moment you enter the slope an 8-second freestyle timer starts. Your freestyle points become a speed boost (up to +11 km/h) when it ends.
 **Tokens:** every 5 gold tokens fire a **Turbo**. Rarer power tokens give a **Turbo** (T, burst of speed), a **Shield** (S, a bubble that shrugs off the next zombie, bat or crash) or **Mega Air** (A, 45% higher ollies for 8 seconds, so bigger tricks on The Drop). Grab the A tokens just before The Drop.
-**Crashes:** hitting a wall head-on costs most of your speed. Hit a crate fast enough and it smashes.
+**Momentum:** air drag grows with speed, so top speed comes from the slope, not just kicking; carving hard at speed scrubs a little off. The Drop pulls harder than before.
+**Crashes:** hitting a wall head-on costs most of your speed, and at full speed (over ~32 km/h) it throws you off the board (**SLAM!**). A glancing hit just scrapes you along the wall. Land a huge drop flat and you bail. Racers shoulder-bump. Hit a crate fast enough and it smashes.
+**Secrets:** some things in this tunnel aren't from this tunnel. Look around.
 **Zombies** rise out of cracks in the floor, shamble into the lane and sink again on an 8-second cycle. Run into one and you lose speed. **Bats** swoop down to head height and spook you.
 **The pit:** take the narrow plank, or ollie the 6 m gap at full speed. Fall in and you respawn at the last checkpoint.
 
