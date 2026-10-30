@@ -80,6 +80,8 @@ var _bats: Array[Node3D] = []
 var _local_clock := 0.0
 var _blinkers: Array[OmniLight3D] = []
 var _blink_t := 0.0
+var _glow_light: OmniLight3D
+var _glow_mat: StandardMaterial3D
 
 var _mat_dry := _material(Color("6b6157"), 0.9)
 var _mat_wet := _material(Color("34434a"), 0.15, 0.3)
@@ -94,6 +96,7 @@ func _ready() -> void:
 	_build_course()
 	_build_lights()
 	_build_props()
+	_build_drain_glow()
 	_build_zombies()
 	_build_bats()
 	_build_tokens()
@@ -104,6 +107,7 @@ func _process(delta: float) -> void:
 	var on := fmod(_blink_t, 0.8) < 0.4
 	for light in _blinkers:
 		light.light_energy = 3.0 if on else 0.2
+	_pulse_drain_glow()
 	var t := clock()
 	for i in _bats.size():
 		_place_bat(i, t)
@@ -547,6 +551,44 @@ func _build_props() -> void:
 		_box(Vector3(0.1, 2.4, 1.4), Vector3(x, top + 1.2, z), _material(Color("2a1f17"), 0.9), false)
 		_wall_sign("DOOR %02d" % door, Vector3(x * 0.99, top + 2.7, z), 1 if x < 0 else -1, Color("e8e2d4"))
 		door += 1
+
+
+## Something down there is awake. A faint glow breathes behind one storm-drain
+## grate low on the wall in the crate field. No sign, no name: just the color.
+const DRAIN_GLOW_Z := -164.0
+const DRAIN_GLOW_COLOR := Color(0.05, 0.85, 1.0)
+
+
+func _build_drain_glow() -> void:
+	var x := -LANE_HALF_WIDTH + 0.02
+	var y := LOW_TOP + 0.45
+	# Dark opening in the wall.
+	_box(Vector3(0.04, 0.7, 1.3), Vector3(x, y, DRAIN_GLOW_Z), _material(Color("050707"), 1.0), false)
+	# The glow, set back behind the bars.
+	_glow_mat = _material(DRAIN_GLOW_COLOR, 1.0, 0.0, 1.5)
+	_box(Vector3(0.02, 0.5, 1.0), Vector3(x + 0.01, y, DRAIN_GLOW_Z), _glow_mat, false)
+	# Rusty bars in front of it.
+	var rust := _material(Color("3b2a20"), 0.7, 0.6)
+	for i in 7:
+		_box(Vector3(0.06, 0.72, 0.06), Vector3(x + 0.05, y, DRAIN_GLOW_Z - 0.6 + i * 0.2), rust, false)
+	for dy in [-0.36, 0.36]:
+		_box(Vector3(0.07, 0.07, 1.36), Vector3(x + 0.05, y + dy, DRAIN_GLOW_Z), rust, false)
+	# Light that spills onto the wet floor.
+	_glow_light = OmniLight3D.new()
+	_glow_light.light_color = DRAIN_GLOW_COLOR
+	_glow_light.omni_range = 3.5
+	_glow_light.position = Vector3(x + 0.6, y, DRAIN_GLOW_Z)
+	add_child(_glow_light)
+
+
+## A slow breath, about every 5 seconds, with a rare brighter flare.
+func _pulse_drain_glow() -> void:
+	if _glow_light == null:
+		return
+	var breath := 0.5 + 0.5 * sin(_blink_t * TAU / 5.0)
+	var flare := 1.0 if fmod(_blink_t, 37.0) < 0.6 else 0.0
+	_glow_light.light_energy = 0.35 + 0.9 * breath + 2.0 * flare
+	_glow_mat.emission_energy_multiplier = 0.6 + 1.6 * breath + 3.0 * flare
 
 
 func _finish_strip() -> void:
