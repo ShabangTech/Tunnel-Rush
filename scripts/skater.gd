@@ -248,7 +248,7 @@ func _physics_process(delta: float) -> void:
 	kick_phase = clampf(_kick_t / _kick_len, 0.0, 1.0) if _kicking else 0.0
 	_update_freestyle(delta)
 
-	if global_position.y < Level.FALL_LIMIT:
+	if global_position.y < Level.fall_limit(global_position.z):
 		_respawn()
 
 
@@ -267,6 +267,12 @@ func _after_move(fwd: Vector3, delta: float) -> void:
 		var collider := hit.get_collider()
 		if n.y > 0.7:
 			_floor_drag = Level.drag_of(collider)
+			continue
+		if collider and collider.has_meta("pedestrian"):
+			if _hazard_cooldown == 0.0 and not _use_shield("WATCH IT"):
+				speed *= 0.75
+				trick_event.emit("WATCH IT!", "bail")
+			_hazard_cooldown = maxf(_hazard_cooldown, 1.0)
 			continue
 		if collider and collider.has_meta("zombie"):
 			if _hazard_cooldown == 0.0 and _use_shield("ZOMBIE"):
@@ -670,7 +676,7 @@ func _bot_input() -> Dictionary:
 		var query := PhysicsRayQueryParameters3D.create(from, from + forward() * 7.0)
 		query.exclude = [get_rid()]
 		var hit := space.intersect_ray(query)
-		if hit and (hit.collider.has_meta("crate") or hit.collider.has_meta("zombie")):
+		if hit and (hit.collider.has_meta("crate") or hit.collider.has_meta("zombie") or hit.collider.has_meta("pedestrian")):
 			var crate_x: float = hit.collider.global_position.x
 			_bot_lane = clampf(crate_x + (1.9 if pos.x >= crate_x else -1.9), -3.3, 3.3)
 			target_x = _bot_lane

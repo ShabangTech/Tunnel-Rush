@@ -344,9 +344,10 @@ func _build_menu() -> void:
 	_menu.add_child(center)
 	_main_panel = PanelContainer.new()
 	center.add_child(_main_panel)
+	_main_panel.custom_minimum_size = Vector2(440, 0)
 	var box := _vbox(_main_panel)
 	_text(box, "TUNNEL RUSH", 48)
-	_text(box, "Online skateboard race through a flooded tunnel", 16)
+	_text(box, "Online skateboard race: tunnels, a bridge over the bay, and zombies", 16)
 	_name_edit = LineEdit.new()
 	_name_edit.placeholder_text = "Your name"
 	_name_edit.text = _opts.get("name", "")
@@ -358,14 +359,19 @@ func _build_menu() -> void:
 	_animal_pick.add_item("Random")
 	box.add_child(_animal_pick)
 	_button(box, "Race the bots", start_solo)
-	_button(box, "Host an online race", start_host)
-	var row := HBoxContainer.new()
-	box.add_child(row)
 	_ip_edit = LineEdit.new()
 	_ip_edit.text = "127.0.0.1"
-	_ip_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(_ip_edit)
-	_button(row, "Join", func(): start_join(_ip_edit.text.strip_edges()))
+	if OS.has_feature("web"):
+		# Browsers can't open the UDP connection online races use: race the bots here,
+		# and download the desktop version for 4-player online races.
+		_text(box, "Online 4-player races: download the Windows version", 14)
+	else:
+		_button(box, "Host an online race", start_host)
+		var row := HBoxContainer.new()
+		box.add_child(row)
+		_ip_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(_ip_edit)
+		_button(row, "Join", func(): start_join(_ip_edit.text.strip_edges()))
 	_status = _text(box, "", 14)
 
 	_lobby_panel = PanelContainer.new()

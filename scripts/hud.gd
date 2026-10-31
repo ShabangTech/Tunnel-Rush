@@ -84,12 +84,12 @@ func _process(delta: float) -> void:
 		_speed.text = "%d km/h" % roundi(me.speed * 3.6)
 		var pips := ""
 		for i in 3:
-			pips += "● " if i < mini(me.kicks, 3) else "○ "
+			pips += "| " if i < mini(me.kicks, 3) else ". "
 		_kicks.text = "KICK  " + pips
 		_place.text = _place_text(me)
 		var meter := ""
 		for i in me.GOLD_FOR_TURBO:
-			meter += "◆" if i < me.gold else "◇"
+			meter += "#" if i < me.gold else "-"
 		_tokens.text = "TOKENS %s  (%d)" % [meter, me.gold_total]
 		var active := PackedStringArray()
 		if me.turbo_on:

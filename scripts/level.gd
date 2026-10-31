@@ -2,7 +2,10 @@ extends Node3D
 ## The race course, built in code from greybox shapes. Every peer builds the same one.
 ##
 ##   START (dry) -> wet straight -> THE DROP: an 8-second freestyle slope with three
-##   kickers -> crate field (dry) -> plank over the pit -> wet sprint -> FINISH
+##   kickers -> crate field (dry) -> plank over the pit -> DOWN TUNNEL 1 -> THE BAY BRIDGE
+##   (open air over blue water) -> DOWN TUNNEL 2 -> FINISH PLAZA
+##
+## Everything after the pit is built by city.gd.
 ##
 ## Wet floors keep your speed, dry floors drag. Zombies claw up out of the floor and
 ## shamble into the lane (they block you), and bats swoop down at head height.
@@ -13,6 +16,8 @@ extends Node3D
 ##
 ## Hazards move on the shared race clock, so every peer sees them in the same place
 ## without sending any network traffic.
+
+const City := preload("res://scripts/city.gd")
 
 const LANE_HALF_WIDTH := 4.0
 const DRAG_DRY := 1.2            # m/s lost per second while coasting
@@ -30,14 +35,26 @@ const KICKER_RISE := 1.4
 
 const GAP_START := -190.0
 const GAP_END := -196.0
-const FINISH_Z := -228.0
-const COURSE_END := -240.0
-const FALL_LIMIT := LOW_TOP - 9.0
+
+# After the pit (city.gd): two wet down tunnels that build and hold top speed, with an
+# open-air bridge over the bay between them, then the finish plaza.
+const TUN1_START := -206.0
+const TUN1_END := -266.0
+const H_TUN1 := LOW_TOP - 6.0          # floor height at the bottom of down tunnel 1
+const BRIDGE_END := -346.0
+const H_BRIDGE := H_TUN1 - 1.2         # the bridge falls just enough to hold your speed
+const TUN2_END := -406.0
+const H_TUN2 := H_BRIDGE - 6.0
+const FINISH_Z := -426.0
+const COURSE_END := -440.0
+const FALL_LIMIT := LOW_TOP - 9.0      # the pit (see fall_limit() for the whole course)
 
 ## Respawn points, in course order. A skater respawns at the last one it passed.
 const CHECKPOINTS: Array[Vector3] = [
 	Vector3(0, 0.2, -2), Vector3(0, 0.2, -48), Vector3(0, LOW_TOP + 0.2, -145),
 	Vector3(0, LOW_TOP + 0.2, -182), Vector3(0, LOW_TOP + 0.2, -200),
+	Vector3(0, H_TUN1 + 0.3, -270), Vector3(0, H_TUN1 - 0.6, -306), Vector3(0, H_BRIDGE + 0.3, -348),
+	Vector3(0, H_TUN2 + 0.3, -410),
 ]
 
 ## Crates in the dry section (x, z). Hit one hard enough and it smashes.
@@ -52,6 +69,7 @@ const ZOMBIES: Array[Vector4] = [
 	Vector4(-1.5, -40, 0.0, 1), Vector4(2.0, -47, 3.5, -1), Vector4(0.5, -157, 1.5, -1),
 	Vector4(-2.5, -167, 5.0, 1), Vector4(2.6, -181, 2.5, -1), Vector4(-1.0, -208, 4.0, 1),
 	Vector4(1.8, -216, 0.5, -1), Vector4(-2.2, -223, 6.0, 1),
+	Vector4(-2.0, -296, 1.0, 1), Vector4(2.2, -322, 4.5, -1), Vector4(-1.5, -414, 2.0, 1),
 ]
 const ZOMBIE_CYCLE := 8.0
 ## Bat flocks: (center z, half length of the stretch they patrol).
@@ -88,6 +106,7 @@ var _blinkers: Array[OmniLight3D] = []
 var _blink_t := 0.0
 var _glow_light: OmniLight3D
 var _glow_mat: StandardMaterial3D
+var _env: Environment
 
 var _mat_dry := _material(Color("6b6157"), 0.9)
 var _mat_wet := _material(Color("34434a"), 0.15, 0.3)
@@ -107,6 +126,10 @@ func _ready() -> void:
 	_build_zombies()
 	_build_bats()
 	_build_tokens()
+	var city := City.new()
+	city.name = "City"
+	add_child(city)
+	city.build(self, _env)
 
 
 func _process(delta: float) -> void:
@@ -190,8 +213,12 @@ func _build_tokens() -> void:
 			_token(Token.GOLD, Vector3(0, 2.0 + (1.0 if k == 1 else 0.0), z))
 	for z in [-157.0, -167.0, -177.0, -187.0]:
 		_token(Token.GOLD, Vector3(0.6 if int(z) % 2 == 0 else -0.6, 0, z))
-	for z in range(-200, -226, -3):
+	for z in range(-200, -262, -3):                          # down tunnel 1
 		_token(Token.GOLD, Vector3(-2.0 if (z / 3) % 2 == 0 else 2.0, 0, z))
+	for z in range(-272, -342, -5):                          # the bridge
+		_token(Token.GOLD, Vector3(1.4 * sin(z * 0.3), 0, z))
+	for z in range(-352, -402, -4):                          # down tunnel 2
+		_token(Token.GOLD, Vector3(0.0, 0, z))
 	# Power tokens where they matter.
 	_token(Token.MEGA_AIR, Vector3(-1.5, 0, -52))       # right before The Drop
 	_token(Token.MEGA_AIR, Vector3(1.5, 0, -52))
@@ -200,6 +227,9 @@ func _build_tokens() -> void:
 	_token(Token.TURBO, Vector3(-2.4, 0, -146))
 	_token(Token.TURBO, Vector3(0, 0, -199))            # after the pit: sprint home
 	_token(Token.SHIELD, Vector3(-2.6, 0, -205))
+	_token(Token.SHIELD, Vector3(2.6, 0, -280))              # people crossing the bridge
+	_token(Token.TURBO, Vector3(-2.4, 0, -340))              # into down tunnel 2
+	_token(Token.TURBO, Vector3(2.4, 0, -340))
 	# The hidden one.
 	_token(Token.SIGNAL, Vector3(0, SIGNAL_TOKEN_HEIGHT, KICKER_Z[2] - KICKER_LENGTH - 5.5))
 
@@ -258,9 +288,22 @@ func bat_hits(point: Vector3) -> bool:
 static func floor_y(z: float) -> float:
 	if z > SLOPE_START:
 		return 0.0
-	if z < SLOPE_END:
+	if z >= SLOPE_END:
+		return -SLOPE_DROP * (SLOPE_START - z) / (SLOPE_START - SLOPE_END)
+	if z > TUN1_START:
 		return LOW_TOP
-	return -SLOPE_DROP * (SLOPE_START - z) / (SLOPE_START - SLOPE_END)
+	if z >= TUN1_END:
+		return lerpf(LOW_TOP, H_TUN1, (TUN1_START - z) / (TUN1_START - TUN1_END))
+	if z >= BRIDGE_END:
+		return lerpf(H_TUN1, H_BRIDGE, (TUN1_END - z) / (TUN1_END - BRIDGE_END))
+	if z >= TUN2_END:
+		return lerpf(H_BRIDGE, H_TUN2, (BRIDGE_END - z) / (BRIDGE_END - TUN2_END))
+	return H_TUN2
+
+
+## Below this height at z you've fallen off the course and respawn.
+static func fall_limit(z: float) -> float:
+	return floor_y(z) - 9.0
 
 
 static func in_freestyle_zone(z: float) -> bool:
@@ -444,6 +487,7 @@ func _build_environment() -> void:
 	env.fog_light_color = Color("1c2421")
 	env.fog_density = 0.02
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	_env = env
 	var world_env := WorldEnvironment.new()
 	world_env.environment = env
 	add_child(world_env)
@@ -456,19 +500,21 @@ func _build_course() -> void:
 	for z in KICKER_Z:
 		_kicker(z)
 	_floor(Vector3(0, LOW_TOP, (SLOPE_END + GAP_START) / 2.0), SLOPE_END - GAP_START, _mat_dry, DRAG_DRY)
-	_floor(Vector3(0, LOW_TOP, (GAP_END + COURSE_END) / 2.0), GAP_END - COURSE_END, _mat_wet, DRAG_WET)
+	_floor(Vector3(0, LOW_TOP, (GAP_END + TUN1_START) / 2.0), GAP_END - TUN1_START, _mat_wet, DRAG_WET)
 
 	# The plank across the pit.
 	var plank := _box(Vector3(1.4, 0.15, GAP_START - GAP_END + 0.6),
 		Vector3(0, LOW_TOP - 0.075, (GAP_START + GAP_END) / 2.0), _mat_plank)
 	plank.set_meta("drag", DRAG_DRY)
 
-	# Side walls, back wall, end wall.
-	var length := 6.0 - COURSE_END
+	# Side walls, back wall and the roof of the old tunnel (down tunnel 1 carries on from it).
+	var length := 6.0 - TUN1_START
 	for side in [-1, 1]:
 		_box(Vector3(1, 22, length), Vector3(side * (LANE_HALF_WIDTH + 0.5), -7, 6 - length / 2.0), _mat_wall)
 	_box(Vector3(10, 22, 1), Vector3(0, -7, 6.5), _mat_wall)
-	_box(Vector3(10, 22, 1), Vector3(0, -7, COURSE_END - 0.5), _mat_wall)
+	_box(Vector3(LANE_HALF_WIDTH * 2.0 + 2.0, 1, length), Vector3(0, 4.5, 6 - length / 2.0), _material(Color("1d1f22"), 0.9))
+	# A step down from the old tunnel's roof to down tunnel 1's.
+	_box(Vector3(LANE_HALF_WIDTH * 2.0 + 2.0, 16, 1), Vector3(0, LOW_TOP + 14.0, TUN1_START - 0.5), _mat_wall, false)
 
 
 func _floor(center_top: Vector3, length: float, mat: Material, drag: float) -> void:
@@ -508,7 +554,7 @@ func _kicker(z_start: float) -> void:
 func _build_lights() -> void:
 	var z := -6.0
 	var side := 1
-	while z > COURSE_END:
+	while z > TUN1_START:
 		var light := OmniLight3D.new()
 		light.light_color = Color("ffb36b")
 		light.light_energy = 1.6
@@ -549,14 +595,14 @@ func _build_props() -> void:
 	_sign("START", Vector3(0, 3.4, -1.5), Color("7cff6b"))
 	_sign("THE DROP", Vector3(0, 3.6, SLOPE_START + 1.0), Color("d38cff"), 120)
 	_sign("FREESTYLE  Q spin   E flip   F grab", Vector3(0, 2.6, SLOPE_START + 1.0), Color("f0dcff"), 48)
-	_sign("FINISH", Vector3(0, LOW_TOP + 3.4, FINISH_Z), Color("ffd23f"))
+	_sign("FINISH", Vector3(0, floor_y(FINISH_Z) + 3.4, FINISH_Z), Color("ffd23f"))
 	_finish_strip()
 
 	# Signs and numbered doors along the walls.
 	_wall_sign("NO TRESPASSING", Vector3(LANE_HALF_WIDTH - 0.02, LOW_TOP + 1.8, GAP_START + 3.0), -1, Color("ff3b30"))
 	_wall_sign("NO TRESPASSING", Vector3(-LANE_HALF_WIDTH + 0.02, LOW_TOP + 1.8, GAP_START + 3.0), 1, Color("ff3b30"))
 	var door := 1
-	for z in [-20.0, -45.0, -152.0, -176.0, -210.0]:
+	for z in [-20.0, -45.0, -152.0, -176.0, -201.0]:
 		var top := floor_y(z)
 		var x := -LANE_HALF_WIDTH + 0.05 if door % 2 == 1 else LANE_HALF_WIDTH - 0.05
 		_box(Vector3(0.1, 2.4, 1.4), Vector3(x, top + 1.2, z), _material(Color("2a1f17"), 0.9), false)
@@ -609,7 +655,7 @@ func _finish_strip() -> void:
 		mesh.size = Vector3(1.0, 0.02, 1.0)
 		tile.mesh = mesh
 		tile.material_override = _material(Color.WHITE if i % 2 == 0 else Color.BLACK, 0.6)
-		tile.position = Vector3(-3.5 + i, LOW_TOP + 0.01, FINISH_Z)
+		tile.position = Vector3(-3.5 + i, floor_y(FINISH_Z) + 0.01, FINISH_Z)
 		add_child(tile)
 
 
@@ -617,7 +663,7 @@ func _finish_strip() -> void:
 func _build_easter_eggs() -> void:
 	_tag("POPDAT", Vector3(LANE_HALF_WIDTH - 0.02, 1.7, -18.0), -1, Color("ff4fc8"))
 	_tag("POPDAT", Vector3(-LANE_HALF_WIDTH + 0.02, LOW_TOP + 2.0, -150.0), 1, Color("35f0ff"))
-	_tag("POPDAT", Vector3(LANE_HALF_WIDTH - 0.02, LOW_TOP + 1.8, -214.0), -1, Color("ffd23f"))
+	_tag("POPDAT", Vector3(LANE_HALF_WIDTH - 0.02, floor_y(-200.0) + 1.8, -200.0), -1, Color("ffd23f"))
 
 
 func _tag(text: String, pos: Vector3, facing_x: int, color: Color) -> void:
@@ -630,7 +676,8 @@ func _tag(text: String, pos: Vector3, facing_x: int, color: Color) -> void:
 	label.outline_modulate = Color("101014")
 	label.modulate = color
 	label.position = pos
-	label.rotation = Vector3(0, PI / 2.0 if facing_x > 0 else -PI / 2.0, 0.08 * sin(pos.z))
+	var yaw := 0.0 if facing_x == 0 else (PI / 2.0 if facing_x > 0 else -PI / 2.0)    # 0: faces +z
+	label.rotation = Vector3(0, yaw, 0.08 * sin(pos.z))
 	label.add_to_group("popdat_tags")
 	add_child(label)
 
